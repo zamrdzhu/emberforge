@@ -233,10 +233,15 @@ export function isAncestor(store: Store, ancestor: string, descendant: string): 
 }
 
 /** The full object closure a clone of `tips` needs, honouring `haves` and shallow cuts. */
-export function closure(store: Store, tips: string[], haves: Set<string>, shallowAt = new Set<string>()): Set<string> {
+export function closure(store: Store, tips: string[], haves: Set<string>, shallowAt = new Set<string>(), clientShallow = new Set<string>()): Set<string> {
   const out = new Set<string>();
   const haveCommits = new Set<string>();
   for (const h of haves) {
+    // A commit the client holds shallowly vouches for itself only, not for its ancestry.
+    if (clientShallow.has(h)) {
+      haveCommits.add(h);
+      continue;
+    }
     for (const c of walkCommits(store, h)) haveCommits.add(c);
   }
   const visitTree = (treeSha: string): void => {
@@ -253,15 +258,27 @@ export function closure(store: Store, tips: string[], haves: Set<string>, shallo
   const seenCommits = new Set<string>();
   while (queue.length > 0) {
     const sha = queue.shift()!;
-    if (seenCommits.has(sha) || haveCommits.has(sha)) continue;
+    if (seenCommits.has(sha)) continue;
     seenCommits.add(sha);
     const obj = store.get(sha);
-    if (obj === undefined || obj.type !== 'commit') continue;
-    out.add(sha);
-    const commit = parseCommit(obj.data);
-    visitTree(commit.tree);
+    if (obj === undefined) continue;
+    if (obj.type === 'tag') {
+      // An annotated tag travels with the pack and points the walk at its target.
+      out.add(sha);
+      const m = /^object ([0-9a-f]{40})$/m.exec(obj.data.toString('utf8'));
+      if (m !== null) queue.push(m[1]!);
+      continue;
+    }
+    if (obj.type !== 'commit') continue;
+    const held = haveCommits.has(sha);
+    if (!held) {
+      out.add(sha);
+      visitTree(parseCommit(obj.data).tree);
+    }
     if (shallowAt.has(sha)) continue; // a shallow boundary: its parents stay home
-    for (const p of commit.parents) queue.push(p);
+    if (held && !clientShallow.has(sha)) continue; // a full have: its ancestry is held too
+    // A shallow have is held itself, but its parents are exactly what a deepen asks for.
+    for (const p of parseCommit(obj.data).parents) queue.push(p);
   }
   return out;
 }

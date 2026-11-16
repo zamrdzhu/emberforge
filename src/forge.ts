@@ -118,7 +118,7 @@ export interface Repo {
   created_at: string;
   updated_at: string;
   pushed_at: string;
-  refs: Map<string, string>; // branch name -> commit sha
+  refs: Map<string, string>; // full ref name (refs/heads/..., refs/tags/...) -> object sha
   labels: Map<string, Label>;
   issues: Map<number, Issue>;
   pulls: Map<number, Pull>;
@@ -192,9 +192,22 @@ export class Forge {
     return id;
   }
 
+  /** The sha a full ref points at, or undefined. */
+  ref(repo: Repo, fullRef: string): string | undefined {
+    return repo.refs.get(fullRef);
+  }
+
+  branchTip(repo: Repo, branch: string): string | undefined {
+    return repo.refs.get(`refs/heads/${branch}`);
+  }
+
+  setBranch(repo: Repo, branch: string, sha: string): void {
+    repo.refs.set(`refs/heads/${branch}`, sha);
+  }
+
   /** The tree sha at a branch tip, or null when the branch (or its commit) is absent. */
   tipTree(repo: Repo, branch: string): string | null {
-    const sha = repo.refs.get(branch);
+    const sha = repo.refs.get(`refs/heads/${branch}`);
     if (sha === undefined) return null;
     const obj = this.store.get(sha);
     if (obj === undefined || obj.type !== 'commit') return null;

@@ -14,6 +14,7 @@ export interface Ctx {
   query: URLSearchParams;
   body: Record<string, unknown> | null;
   rawBody: Buffer;
+  gitProtocol?: string;
 }
 
 export interface Reply {
@@ -63,7 +64,7 @@ interface CommitResult {
 
 /** Commit a new tree onto a branch (or start the branch), returning the commit sha. */
 function commitOnto(ctx: Ctx, repo: Repo, branch: string, treeSha: string, message: string): CommitResult {
-  const parent = repo.refs.get(branch);
+  const parent = ctx.forge.branchTip(repo, branch);
   const commit = makeCommit(ctx.forge.store, {
     tree: treeSha,
     parents: parent !== undefined ? [parent] : [],
@@ -71,7 +72,7 @@ function commitOnto(ctx: Ctx, repo: Repo, branch: string, treeSha: string, messa
     committer: forgeAuthor(),
     message: message.endsWith('\n') ? message : `${message}\n`,
   });
-  repo.refs.set(branch, commit);
+  ctx.forge.setBranch(repo, branch, commit);
   repo.pushed_at = Forge.clock.iso();
   repo.updated_at = repo.pushed_at;
   return { sha: commit };
@@ -246,8 +247,8 @@ export function mergeBase(ctx: Ctx, a: string, b: string): string | null {
 /** Would merging head into base conflict? Same path changed on both sides since the base. */
 export function mergeConflicts(ctx: Ctx, repo: Repo, pull: Pull): boolean {
   const store = ctx.forge.store;
-  const baseTip = repo.refs.get(pull.baseRef);
-  const headTip = repo.refs.get(pull.headRef);
+  const baseTip = forge.branchTip(repo, pull.baseRef);
+  const headTip = forge.branchTip(repo, pull.headRef);
   if (baseTip === undefined || headTip === undefined) return true;
   if (baseTip === pull.baseSha) return false; // the base never moved
   const mb = mergeBase(ctx, baseTip, headTip);
@@ -265,8 +266,8 @@ export function mergeConflicts(ctx: Ctx, repo: Repo, pull: Pull): boolean {
 /** Three-way tree merge: head's changes laid over the base tip's tree. */
 function mergedTree(ctx: Ctx, repo: Repo, pull: Pull): string {
   const store = ctx.forge.store;
-  const baseTip = repo.refs.get(pull.baseRef)!;
-  const mb = mergeBase(ctx, baseTip, repo.refs.get(pull.headRef)!);
+  const baseTip = forge.branchTip(repo, pull.baseRef)!;
+  const mb = mergeBase(ctx, baseTip, forge.branchTip(repo, pull.headRef)!);
   const mbTree = mb !== null ? parseCommit(store.get(mb)!.data).tree : null;
   const files = new Map<string, string>();
   const baseFlat = flattenTree(store, parseCommit(store.get(baseTip)!.data).tree);
@@ -374,7 +375,7 @@ function handleRepoScoped(ctx: Ctx, repo: Repo, rest: string[]): Reply {
       const sha = str(body.sha) ?? '';
       const branch = ref.replace(/^refs\/heads\//, '').replace(/^refs\//, '');
       if (store.get(sha)?.type !== 'commit') return fail(422, 'Object is not a commit');
-      repo.refs.set(branch, sha);
+      repo.refs.set(ref.startsWith('refs/') ? ref : `refs/heads/${branch}`, sha);
       return json(201, {
         ref: `refs/heads/${branch}`,
         node_id: `REF_${repo.id}_${branch}`,
@@ -383,9 +384,9 @@ function handleRepoScoped(ctx: Ctx, repo: Repo, rest: string[]): Reply {
       });
     }
     if (method === 'GET') {
-      const out = [...repo.refs.entries()].map(([branch, sha]) => ({
-        ref: `refs/heads/${branch}`,
-        object: { sha, type: 'commit' },
+      const out = [...repo.refs.entries()].map(([fullRef, sha]) => ({
+        ref: fullRef,
+        object: { sha, type: store.get(sha)?.type ?? 'commit' },
       }));
       return json(200, out);
     }
@@ -393,15 +394,15 @@ function handleRepoScoped(ctx: Ctx, repo: Repo, rest: string[]): Reply {
 
   if (head === 'branches') {
     if (method === 'GET' && rest.length === 1) {
-      return json(200, [...repo.refs.entries()].map(([branch, sha]) => ({
-        name: branch,
+      return json(200, [...repo.refs.entries()].filter(([fullRef]) => fullRef.startsWith('refs/heads/')).map(([fullRef, sha]) => ({
+        name: fullRef.slice('refs/heads/'.length),
         commit: { sha, url: `/api/v3/repos/${repo.owner.login}/${repo.name}/commits/${sha}` },
         protected: false,
       })));
     }
     if (method === 'GET' && rest.length === 2) {
       const branch = decodeURIComponent(rest[1]!);
-      const sha = repo.refs.get(branch);
+      const sha = forge.branchTip(repo, branch);
       if (sha === undefined) return fail(404, 'Not Found');
       return json(200, { name: branch, commit: { sha, url: `/api/v3/repos/${repo.owner.login}/${repo.name}/commits/${sha}` }, protected: false });
     }
@@ -410,7 +411,7 @@ function handleRepoScoped(ctx: Ctx, repo: Repo, rest: string[]): Reply {
   if (head === 'commits') {
     if (method === 'GET' && rest.length === 1) {
       const ref = ctx.query.get('sha') ?? repo.default_branch;
-      const tip = repo.refs.get(ref) ?? (store.get(ref)?.type === 'commit' ? ref : undefined);
+      const tip = forge.branchTip(repo, ref) ?? (store.get(ref)?.type === 'commit' ? ref : undefined);
       if (tip === undefined) return json(200, []);
       const items = walkCommits(store, tip).map((sha) => {
         const c = parseCommit(store.get(sha)!.data);
@@ -579,8 +580,8 @@ function handlePulls(ctx: Ctx, repo: Repo, rest: string[]): Reply {
       if (title === undefined || headRaw === undefined || baseRaw === undefined) return fail(422, 'title, head and base are required');
       const headRef = headRaw.includes(':') ? headRaw.split(':').pop()! : headRaw;
       const baseRef = baseRaw.includes(':') ? baseRaw.split(':').pop()! : baseRaw;
-      const headSha = repo.refs.get(headRef);
-      const baseSha = repo.refs.get(baseRef);
+      const headSha = forge.branchTip(repo, headRef);
+      const baseSha = forge.branchTip(repo, baseRef);
       if (headSha === undefined) return fail(422, `Head ref ${headRef} does not exist`);
       if (baseSha === undefined) return fail(422, `Base ref ${baseRef} does not exist`);
       if (headSha === baseSha) return fail(422, 'No commits between base and head');
@@ -639,7 +640,7 @@ function handlePulls(ctx: Ctx, repo: Repo, rest: string[]): Reply {
     if (pull === undefined) return fail(404, 'Not Found');
     if (method === 'GET') {
       // Refresh the ref tips: a pull's head/base follow their branches.
-      pull.headSha = repo.refs.get(pull.headRef) ?? pull.headSha;
+      pull.headSha = forge.branchTip(repo, pull.headRef) ?? pull.headSha;
       return json(200, pullJson(repo, pull));
     }
     if (method === 'PATCH') {

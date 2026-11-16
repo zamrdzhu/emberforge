@@ -95,7 +95,8 @@ export function createApp(): Server {
         }
       }
 
-      const ctx = { forge, method, path, query: url.searchParams, body, rawBody };
+      const gitProtocol = req.headers['git-protocol'];
+      const ctx = { forge, method, path, query: url.searchParams, body, rawBody, gitProtocol: typeof gitProtocol === 'string' ? gitProtocol : undefined };
 
       if (path.startsWith('/api/v3') || path === '/api/v3') {
         const reply = handleRest(ctx);
@@ -110,8 +111,16 @@ export function createApp(): Server {
         sendReply(res, await handleMcp(ctx));
         return;
       }
+      if (process.env.FORGE_DEBUG !== undefined && path.includes('.git')) {
+        const { appendFileSync } = await import('node:fs');
+        appendFileSync('/tmp/gitlog.txt', `${method} ${path} proto=${String(req.headers['git-protocol'] ?? '')}\n${rawBody.toString('latin1').replace(/[^\x20-\x7e\n]/g, '.')}\n====\n`);
+      }
       if (path.includes('.git/') || path.endsWith('.git')) {
         const reply = await handleGit(ctx, url);
+        if (process.env.FORGE_DEBUG !== undefined && reply.raw !== undefined) {
+          const { appendFileSync } = await import('node:fs');
+          appendFileSync('/tmp/gitlog.txt', `RESPONSE ${reply.status} ${reply.raw.length} bytes\n${reply.raw.subarray(0, 400).toString('latin1').replace(/[^\x20-\x7e\n]/g, '.')}\n====\n`);
+        }
         sendReply(res, reply);
         return;
       }

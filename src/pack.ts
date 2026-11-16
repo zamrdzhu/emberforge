@@ -1,7 +1,7 @@
 // Packfiles and pkt-lines: the two wire formats of git smart HTTP. The writer emits whole
 // objects only (no deltas — legal, just less dense); the reader resolves both delta kinds,
 // because a pushing client may send them.
-import { createInflate, deflateSync } from 'node:zlib';
+import { deflateSync, inflateSync } from 'node:zlib';
 import { CODE_TYPES, TYPE_CODES, objectId, sha1Hex, type GitObject, type ObjType, type Store } from './gitobj.ts';
 
 // ---------------------------------------------------------------------------
@@ -91,16 +91,27 @@ export function writePack(store: Store, shas: string[]): Buffer {
 // Pack reading (with delta resolution)
 // ---------------------------------------------------------------------------
 
-/** Inflate one zlib stream starting at `offset`; resolves with the bytes and the offset past it. */
+/**
+ * Inflate one zlib stream starting at `offset`, and find where it ends: Node's inflateSync
+ * ignores trailing bytes and throws on a truncated stream, so the consumed length is the
+ * smallest prefix that inflates — a binary search over the rest of the pack.
+ */
 function inflateAt(buf: Buffer, offset: number): Promise<{ data: Buffer; next: number }> {
-  return new Promise((resolve, reject) => {
-    const stream = createInflate();
-    const chunks: Buffer[] = [];
-    stream.on('data', (c: Buffer) => chunks.push(c));
-    stream.on('error', reject);
-    stream.on('end', () => resolve({ data: Buffer.concat(chunks), next: offset + stream.bytesRead }));
-    stream.end(buf.subarray(offset));
-  });
+  const rest = buf.subarray(offset);
+  let lo = 1;
+  let hi = rest.length;
+  let data: Buffer | null = null;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    try {
+      data = inflateSync(rest.subarray(0, mid));
+      hi = mid;
+    } catch {
+      lo = mid + 1;
+    }
+  }
+  if (data === null) data = inflateSync(rest.subarray(0, lo));
+  return Promise.resolve({ data, next: offset + lo });
 }
 
 function readVarint(buf: Buffer, at: number): { value: number; next: number } {
