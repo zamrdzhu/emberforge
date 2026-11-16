@@ -263,6 +263,31 @@ export function mergeConflicts(ctx: Ctx, repo: Repo, pull: Pull): boolean {
   return false;
 }
 
+/**
+ * Squash-merge a pull request: lay the head's changes (against the merge base) over the base
+ * tip's tree and commit them as one commit on the base branch. Shared by REST, GraphQL and MCP.
+ */
+export function mergePullRequest(forge: Forge, repo: Repo, pull: Pull, opts: { title?: string; message?: string } = {}): { sha: string } | { error: string } {
+  const ctx = { forge } as Ctx;
+  if (pull.state !== 'open' || pull.merged) return { error: 'Pull Request is not mergeable' };
+  if (mergeConflicts(ctx, repo, pull)) return { error: 'Pull Request is not mergeable: conflicts must be resolved' };
+  const tree = mergedTree(ctx, repo, pull);
+  const title = opts.title ?? `${pull.title} (#${pull.number})`;
+  const message = `${title}\n\n${opts.message ?? pull.body ?? ''}`.trimEnd() + '\n';
+  const { sha } = commitOnto(ctx, repo, pull.baseRef, tree, message);
+  pull.merged = true;
+  pull.state = 'closed';
+  pull.merged_at = Forge.clock.iso();
+  pull.merge_commit_sha = sha;
+  pull.updated_at = pull.merged_at;
+  const shadow = repo.issues.get(pull.number);
+  if (shadow !== undefined) {
+    shadow.state = 'closed';
+    shadow.closed_at = pull.merged_at;
+  }
+  return { sha };
+}
+
 /** Three-way tree merge: head's changes laid over the base tip's tree. */
 function mergedTree(ctx: Ctx, repo: Repo, pull: Pull): string {
   const store = ctx.forge.store;
@@ -671,24 +696,13 @@ function handlePulls(ctx: Ctx, repo: Repo, rest: string[]): Reply {
     return paginate(ctx, files);
   }
   if (rest.length === 3 && rest[2] === 'merge' && (method === 'PUT' || method === 'POST')) {
-    if (pull.state !== 'open' || pull.merged) return fail(405, 'Pull Request is not mergeable');
-    if (mergeConflicts(ctx, repo, pull)) return fail(405, 'Pull Request is not mergeable: conflicts must be resolved');
     const body = ctx.body ?? {};
-    const tree = mergedTree(ctx, repo, pull);
-    const title = str(body.commit_title) ?? `${pull.title} (#${pull.number})`;
-    const message = `${title}\n\n${str(body.commit_message) ?? pull.body ?? ''}`.trimEnd() + '\n';
-    const { sha } = commitOnto(ctx, repo, pull.baseRef, tree, message);
-    pull.merged = true;
-    pull.state = 'closed';
-    pull.merged_at = Forge.clock.iso();
-    pull.merge_commit_sha = sha;
-    pull.updated_at = pull.merged_at;
-    const shadow = repo.issues.get(pull.number);
-    if (shadow !== undefined) {
-      shadow.state = 'closed';
-      shadow.closed_at = pull.merged_at;
-    }
-    return json(200, { sha, merged: true, message: 'Pull Request successfully merged' });
+    const result = mergePullRequest(forge, repo, pull, {
+      title: str(body.commit_title),
+      message: str(body.commit_message),
+    });
+    if ('error' in result) return fail(405, result.error);
+    return json(200, { sha: result.sha, merged: true, message: 'Pull Request successfully merged' });
   }
   return fail(404, 'Not Found');
 }
