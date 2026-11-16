@@ -236,22 +236,44 @@ export function isAncestor(store: Store, ancestor: string, descendant: string): 
 export function closure(store: Store, tips: string[], haves: Set<string>, shallowAt = new Set<string>(), clientShallow = new Set<string>()): Set<string> {
   const out = new Set<string>();
   const haveCommits = new Set<string>();
+  // Everything reachable from a have is already on the client's disk: commits, their trees
+  // and their blobs must not be re-sent. A shallow have vouches for its own snapshot (the
+  // commit and its tree closure) but not for its ancestry.
+  const haveObjects = new Set<string>();
+  const markTree = (treeSha: string): void => {
+    if (haveObjects.has(treeSha)) return;
+    const obj = store.get(treeSha);
+    if (obj === undefined || obj.type !== 'tree') return;
+    haveObjects.add(treeSha);
+    for (const e of parseTree(obj.data)) {
+      if (e.mode === '40000' || e.mode === '040000') markTree(e.sha);
+      else haveObjects.add(e.sha);
+    }
+  };
+  const markCommit = (sha: string): void => {
+    haveObjects.add(sha);
+    const obj = store.get(sha);
+    if (obj !== undefined && obj.type === 'commit') markTree(parseCommit(obj.data).tree);
+  };
   for (const h of haves) {
-    // A commit the client holds shallowly vouches for itself only, not for its ancestry.
     if (clientShallow.has(h)) {
       haveCommits.add(h);
+      markCommit(h);
       continue;
     }
-    for (const c of walkCommits(store, h)) haveCommits.add(c);
+    for (const c of walkCommits(store, h)) {
+      haveCommits.add(c);
+      markCommit(c);
+    }
   }
   const visitTree = (treeSha: string): void => {
-    if (out.has(treeSha) || haveCommits.has(treeSha)) return;
+    if (out.has(treeSha) || haveObjects.has(treeSha)) return;
     const obj = store.get(treeSha);
     if (obj === undefined || obj.type !== 'tree') return;
     out.add(treeSha);
     for (const e of parseTree(obj.data)) {
       if (e.mode === '40000' || e.mode === '040000') visitTree(e.sha);
-      else out.add(e.sha);
+      else if (!haveObjects.has(e.sha)) out.add(e.sha);
     }
   };
   const queue = [...tips];

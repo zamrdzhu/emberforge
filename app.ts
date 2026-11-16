@@ -96,7 +96,8 @@ export function createApp(): Server {
       }
 
       const gitProtocol = req.headers['git-protocol'];
-      const ctx = { forge, method, path, query: url.searchParams, body, rawBody, gitProtocol: typeof gitProtocol === 'string' ? gitProtocol : undefined };
+      const origin = `http://${typeof req.headers.host === 'string' ? req.headers.host : 'localhost'}`;
+      const ctx = { forge, origin, method, path, query: url.searchParams, body, rawBody, gitProtocol: typeof gitProtocol === 'string' ? gitProtocol : undefined };
 
       if (path.startsWith('/api/v3') || path === '/api/v3') {
         const reply = handleRest(ctx);

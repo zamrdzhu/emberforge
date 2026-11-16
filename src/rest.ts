@@ -9,6 +9,7 @@ import { buildTree, flattenTree, makeCommit, parseCommit, updateTree, walkCommit
 
 export interface Ctx {
   forge: Forge;
+  origin: string;
   method: string;
   path: string;
   query: URLSearchParams;
@@ -42,7 +43,7 @@ function paginate<T>(ctx: Ctx, items: T[]): Reply {
   const slice = items.slice(start, start + perPage);
   const headers: Record<string, string> = {};
   if (start + perPage < items.length) {
-    const base = ctx.path;
+    const base = `${ctx.origin}${ctx.path}`;
     const next = new URLSearchParams(ctx.query);
     next.set('page', String(page + 1));
     next.set('per_page', String(perPage));
@@ -70,7 +71,7 @@ function commitOnto(ctx: Ctx, repo: Repo, branch: string, treeSha: string, messa
     parents: parent !== undefined ? [parent] : [],
     author: forgeAuthor(),
     committer: forgeAuthor(),
-    message: message.endsWith('\n') ? message : `${message}\n`,
+    message,
   });
   ctx.forge.setBranch(repo, branch, commit);
   repo.pushed_at = Forge.clock.iso();
@@ -247,8 +248,8 @@ export function mergeBase(ctx: Ctx, a: string, b: string): string | null {
 /** Would merging head into base conflict? Same path changed on both sides since the base. */
 export function mergeConflicts(ctx: Ctx, repo: Repo, pull: Pull): boolean {
   const store = ctx.forge.store;
-  const baseTip = forge.branchTip(repo, pull.baseRef);
-  const headTip = forge.branchTip(repo, pull.headRef);
+  const baseTip = ctx.forge.branchTip(repo, pull.baseRef);
+  const headTip = ctx.forge.branchTip(repo, pull.headRef);
   if (baseTip === undefined || headTip === undefined) return true;
   if (baseTip === pull.baseSha) return false; // the base never moved
   const mb = mergeBase(ctx, baseTip, headTip);
@@ -273,7 +274,8 @@ export function mergePullRequest(forge: Forge, repo: Repo, pull: Pull, opts: { t
   if (mergeConflicts(ctx, repo, pull)) return { error: 'Pull Request is not mergeable: conflicts must be resolved' };
   const tree = mergedTree(ctx, repo, pull);
   const title = opts.title ?? `${pull.title} (#${pull.number})`;
-  const message = `${title}\n\n${opts.message ?? pull.body ?? ''}`.trimEnd() + '\n';
+  const extra = opts.message ?? pull.body ?? '';
+  const message = extra !== '' ? `${title}\n\n${extra}` : title;
   const { sha } = commitOnto(ctx, repo, pull.baseRef, tree, message);
   pull.merged = true;
   pull.state = 'closed';
@@ -291,8 +293,8 @@ export function mergePullRequest(forge: Forge, repo: Repo, pull: Pull, opts: { t
 /** Three-way tree merge: head's changes laid over the base tip's tree. */
 function mergedTree(ctx: Ctx, repo: Repo, pull: Pull): string {
   const store = ctx.forge.store;
-  const baseTip = forge.branchTip(repo, pull.baseRef)!;
-  const mb = mergeBase(ctx, baseTip, forge.branchTip(repo, pull.headRef)!);
+  const baseTip = ctx.forge.branchTip(repo, pull.baseRef)!;
+  const mb = mergeBase(ctx, baseTip, ctx.forge.branchTip(repo, pull.headRef)!);
   const mbTree = mb !== null ? parseCommit(store.get(mb)!.data).tree : null;
   const files = new Map<string, string>();
   const baseFlat = flattenTree(store, parseCommit(store.get(baseTip)!.data).tree);
