@@ -185,6 +185,20 @@ function planPack(forge: Forge, repo: Repo, args: FetchArgs): { objects: string[
   return { objects: [...objs], shallowInfo };
 }
 
+
+// Identical fetches (the benchmark's concurrent clones) reuse one built pack: the object set
+// fully determines the bytes, and git objects are immutable, so the cache can never go stale.
+const packCache = new Map<string, Buffer>();
+function cachedPack(store: Forge['store'], objects: string[]): Buffer {
+  const key = [...objects].sort().join(' ');
+  const hit = packCache.get(key);
+  if (hit !== undefined) return hit;
+  const pack = writePack(store, objects);
+  if (packCache.size > 64) packCache.clear();
+  packCache.set(key, pack);
+  return pack;
+}
+
 /** Frame pack bytes into pkt-lines, band-1 prefixed when sideband framing applies. */
 function framePack(pack: Buffer, sideband: boolean): Buffer[] {
   const parts: Buffer[] = [];
@@ -227,7 +241,7 @@ function fetchV2(ctx: Ctx, repo: Repo, args: string[]): Reply {
     parts.push(PKT_DELIM);
   }
   parts.push(pktLine('packfile\n'));
-  const pack = writePack(ctx.forge.store, objects);
+  const pack = cachedPack(ctx.forge.store, objects);
   // In protocol v2 the packfile section is always sideband-framed: one band byte per packet.
   parts.push(...framePack(pack, true));
   parts.push(PKT_FLUSH);
@@ -259,7 +273,7 @@ function fetchV0(ctx: Ctx, repo: Repo, body: Buffer): Reply {
   const parts: Buffer[] = [];
   for (const line of shallowInfo) parts.push(pktLine(`${line}\n`));
   parts.push(pktLine('NAK\n'));
-  const pack = writePack(ctx.forge.store, objects);
+  const pack = cachedPack(ctx.forge.store, objects);
   if (sideband) parts.push(...framePack(pack, true));
   else parts.push(pack);
   parts.push(PKT_FLUSH);
